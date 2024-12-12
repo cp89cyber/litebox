@@ -87,8 +87,9 @@ where
 
 /// A provider of raw mutexes
 pub trait RawMutexProvider {
+    type RawMutex;
     /// Allocate a new [`RawMutex`].
-    fn new_raw_mutex(&self) -> impl RawMutex;
+    fn new_raw_mutex(&self) -> Self::RawMutex;
 }
 
 /// A raw mutex/lock API; expected to roughly match (or even be implemented using) a Linux futex.
