@@ -16,6 +16,7 @@
 
 extern crate alloc;
 
+pub mod fd;
 pub mod fs;
 pub mod net;
 pub mod path;
