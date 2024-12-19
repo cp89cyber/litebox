@@ -12,7 +12,7 @@ use core::ffi::c_uint;
 /// The `FileSystem` provides access to all file-system related functionality provided by LiteBox.
 ///
 /// A LiteBox `FileSystem` is parametric in the platform it runs on.
-pub struct FileSystem<Platform: platform::Provider + 'static> {
+pub struct FileSystem<Platform: platform::Provider> {
     platform: &'static Platform,
 }
 
@@ -24,7 +24,7 @@ pub enum FsError {}
 /// A convenience type-alias for filesytem results
 type Result<T> = core::result::Result<T, FsError>;
 
-impl<Platform: platform::Provider + 'static> FileSystem<Platform> {
+impl<Platform: platform::Provider> FileSystem<Platform> {
     /// Construct a new `FileSystem` instance
     ///
     /// This function is expected to only be invoked once per platform, as an initialiation step,
@@ -35,7 +35,7 @@ impl<Platform: platform::Provider + 'static> FileSystem<Platform> {
     }
 }
 
-impl<Platform: platform::Provider + 'static> FileSystem<Platform> {
+impl<Platform: platform::Provider> FileSystem<Platform> {
     /// Opens a file
     ///
     /// The `mode` is only significant when creating a file

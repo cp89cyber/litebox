@@ -9,7 +9,7 @@ use thiserror::Error;
 /// The `Network` provides access to all networking related functionality provided by LiteBox.
 ///
 /// A LiteBox `Network` is parametric in the platform it runs on.
-pub struct Network<Platform: platform::Provider + 'static> {
+pub struct Network<Platform: platform::Provider> {
     platform: &'static Platform,
 }
 
@@ -21,7 +21,7 @@ pub enum NetError {}
 /// A convenience type-alias for networking results
 type Result<T> = core::result::Result<T, NetError>;
 
-impl<Platform: platform::Provider + 'static> Network<Platform> {
+impl<Platform: platform::Provider> Network<Platform> {
     /// Construct a new `Network` instance
     ///
     /// This function is expected to only be invoked once per platform, as an initialization step,
@@ -40,7 +40,7 @@ pub struct SocketFd {
     fd: crate::fd::OwnedFd,
 }
 
-impl<Platform: platform::Provider + 'static> Network<Platform> {
+impl<Platform: platform::Provider> Network<Platform> {
     /// Creates a socket.
     pub fn socket(
         &self,
