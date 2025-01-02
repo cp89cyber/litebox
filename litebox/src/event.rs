@@ -1,5 +1,12 @@
 //! Events related functionality
 
+// TODO(jayb): Is the private/public split in this module a good split? I think we can either
+// increase or decrease the amount that is exposed publicly outside this module, depending on how
+// much we want to expose to the outside world (i.e., outside this crate). If changing things from
+// private to public, more thought needs to go into the design of those private functions though;
+// changing from public to private is doable right now, but would be hard once we start depending on
+// things via a crate from the outside.
+
 use hashbrown::HashMap;
 use smallvec::SmallVec;
 use thiserror::Error;
