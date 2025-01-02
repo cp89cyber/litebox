@@ -7,6 +7,9 @@ use crate::platform;
 use bitflags::bitflags;
 use thiserror::Error;
 
+mod phy;
+mod sockets;
+
 /// The `Network` provides access to all networking related functionality provided by LiteBox.
 ///
 /// A LiteBox `Network` is parametric in the platform it runs on.

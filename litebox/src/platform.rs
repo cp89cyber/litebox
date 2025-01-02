@@ -161,7 +161,7 @@ pub trait IPInterfaceProvider {
     ///
     /// Returns `Ok(())` when entire packet is sent, or a [`SendError`] if it is unable to send the
     /// entire packet.
-    fn send_ip_packet(&self, packet: &[u8]) -> Result<usize, SendError>;
+    fn send_ip_packet(&self, packet: &[u8]) -> Result<(), SendError>;
 
     /// Receive an IP packet into `packet`.
     ///
@@ -178,7 +178,10 @@ pub enum SendError {}
 /// A non-exhaustive list of errors that can be thrown by [`IPInterfaceProvider::receive_ip_packet`].
 #[derive(Error, Debug)]
 #[non_exhaustive]
-pub enum ReceiveError {}
+pub enum ReceiveError {
+    #[error("Receive operation would block")]
+    WouldBlock,
+}
 
 /// An interface to understanding time.
 pub trait TimeProvider {
