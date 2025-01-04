@@ -1,6 +1,6 @@
 //! File-system related functionality
 
-use crate::fd::OwnedFd;
+use crate::fd::FileFd;
 use crate::path;
 use crate::platform;
 
@@ -40,7 +40,7 @@ impl<Platform: platform::Provider> FileSystem<Platform> {
     ///
     /// The `mode` is only significant when creating a file
     #[allow(clippy::needless_pass_by_value)] // `path::Arg` already accounts for references
-    pub fn open(&self, path: impl path::Arg, flags: OFlags, mode: Mode) -> Result<OwnedFd> {
+    pub fn open(&self, path: impl path::Arg, flags: OFlags, mode: Mode) -> Result<FileFd> {
         // NOTE: It is in functions like this that the platform's functionality can be used through
         // `self.platform` as part of the LiteBox implementation. Users of LiteBox do not need to be
         // concerned with how things connect to each other inside LiteBox, they simply maintain the
@@ -49,19 +49,19 @@ impl<Platform: platform::Provider> FileSystem<Platform> {
     }
 
     /// Close the file at `fd`
-    pub fn close(&self, fd: OwnedFd) -> Result<()> {
+    pub fn close(&self, fd: FileFd) -> Result<()> {
         let mut fd = fd;
-        fd.mark_as_closed();
+        fd.x.mark_as_closed();
         todo!()
     }
 
     /// Read from a file descriptor into a buffer
-    pub fn read(&self, fd: &OwnedFd, buf: &mut [u8]) -> Result<usize> {
+    pub fn read(&self, fd: &FileFd, buf: &mut [u8]) -> Result<usize> {
         todo!()
     }
 
     /// Write from a buffer to a file descriptor
-    pub fn write(&self, fd: &OwnedFd, buf: &[u8]) -> Result<usize> {
+    pub fn write(&self, fd: &FileFd, buf: &[u8]) -> Result<usize> {
         todo!()
     }
 

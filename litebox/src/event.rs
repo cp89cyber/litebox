@@ -12,8 +12,7 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::{
-    fd::{OwnedFd, RawFd},
-    net::SocketFd,
+    fd::{FileFd, InternalFd, SocketFd},
     platform::{self, ImmediatelyWokenUp, RawMutex, RawMutexProvider, UnblockedOrTimedOut},
     utilities::array_index_map::{ArrayIndexMap, Index},
 };
@@ -37,7 +36,7 @@ pub struct EventManager<Platform: platform::RawMutexProvider + 'static> {
     // only a small number of `Waitable`s on a single `RawFd`. The number beyond which a heap
     // allocation occurs is a tradeoff between memory usage (wasted unused space) vs number of heap
     // allocations. For now, the chosen number is picked purely based on *vibes*.
-    fd_to_indexes: HashMap<RawFd, SmallVec<[Index; 2]>>,
+    fd_to_indexes: HashMap<InternalFd, SmallVec<[Index; 2]>>,
 }
 
 impl<Platform: platform::RawMutexProvider + 'static> EventManager<Platform> {
@@ -68,7 +67,7 @@ impl<Platform: platform::RawMutexProvider + 'static> EventManager<Platform> {
             .store(Events::empty().bits(), Relaxed);
         let index = self.triggered_events.insert(triggered_events.clone());
         self.fd_to_indexes
-            .entry(builder.raw_fd)
+            .entry(builder.internal_fd)
             .or_default()
             .push(index);
         Waitable {
@@ -84,20 +83,20 @@ impl<Platform: platform::RawMutexProvider + 'static> EventManager<Platform> {
         self.triggered_events.remove(waitable.index).unwrap();
         let idxs = self
             .fd_to_indexes
-            .get_mut(&waitable.builder.raw_fd)
+            .get_mut(&waitable.builder.internal_fd)
             .unwrap();
         idxs.swap_remove(idxs.iter().position(|&idx| idx == waitable.index).unwrap());
         if idxs.is_empty() {
-            self.fd_to_indexes.remove(&waitable.builder.raw_fd);
+            self.fd_to_indexes.remove(&waitable.builder.internal_fd);
         }
     }
 
-    /// Mark the `events` as occurring on `raw_fd`, causing any relevant wake-ups of any
-    /// [`Waitable`]s that might be waiting on the `raw_fd`.
+    /// Mark the `events` as occurring on `internal_fd`, causing any relevant wake-ups of any
+    /// [`Waitable`]s that might be waiting on the `internal_fd`.
     ///
     /// Explicitly *not* exposed as a public API, but only as a crate-internal.
-    pub(crate) fn mark_events(&self, raw_fd: RawFd, events: Events) {
-        let Some(idxs) = self.fd_to_indexes.get(&raw_fd) else {
+    pub(crate) fn mark_events(&self, internal_fd: InternalFd, events: Events) {
+        let Some(idxs) = self.fd_to_indexes.get(&internal_fd) else {
             return;
         };
         for &idx in idxs {
@@ -109,13 +108,13 @@ impl<Platform: platform::RawMutexProvider + 'static> EventManager<Platform> {
         }
     }
 
-    /// Mark the `events` as no longer ocurring on `raw_fd`. This will remove the events from each
-    /// of the [`Waitable`]s on this `raw_fd`. Depending on the use case,
+    /// Mark the `events` as no longer ocurring on `internal_fd`. This will remove the events from
+    /// each of the [`Waitable`]s on this `internal_fd`. Depending on the use case,
     /// [`Waitable::mark_events_as_handled`] might be more applicable.
     ///
     /// Explicitly *not* exposed as a public API, but only as a crate-internal.
-    pub(crate) fn unmark_events(&self, raw_fd: RawFd, events: Events) {
-        let Some(idxs) = self.fd_to_indexes.get(&raw_fd) else {
+    pub(crate) fn unmark_events(&self, internal_fd: InternalFd, events: Events) {
+        let Some(idxs) = self.fd_to_indexes.get(&internal_fd) else {
             return;
         };
         for &idx in idxs {
@@ -131,7 +130,7 @@ impl<Platform: platform::RawMutexProvider + 'static> EventManager<Platform> {
 /// A builder for a [`Waitable`] that specifies a set of [`Events`] that can be waited upon for a
 /// particular file or socket.
 pub struct WaitableBuilder {
-    raw_fd: RawFd,
+    internal_fd: InternalFd,
     events: Events,
     spurious_wakeups: SpuriousWakeups,
 }
@@ -139,9 +138,9 @@ pub struct WaitableBuilder {
 impl WaitableBuilder {
     /// Begin building a waitable for events on a file
     #[must_use]
-    pub fn on_file(fd: &OwnedFd) -> Self {
+    pub fn on_file(fd: &FileFd) -> Self {
         Self {
-            raw_fd: fd.as_raw_fd(),
+            internal_fd: fd.as_internal_fd(),
             events: Events::empty(),
             spurious_wakeups: SpuriousWakeups::Allowed,
         }
@@ -151,7 +150,7 @@ impl WaitableBuilder {
     #[must_use]
     pub fn on_socket(fd: &SocketFd) -> Self {
         Self {
-            raw_fd: fd.fd.as_raw_fd(),
+            internal_fd: fd.as_internal_fd(),
             events: Events::empty(),
             spurious_wakeups: SpuriousWakeups::Allowed,
         }

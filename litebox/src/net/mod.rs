@@ -4,6 +4,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::net::SocketAddr;
 
+use crate::fd::SocketFd;
 use crate::platform;
 use crate::platform::Instant;
 
@@ -69,19 +70,6 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
             zero_time: platform.now(),
             local_port_allocator: LocalPortAllocator::new(),
         }
-    }
-}
-
-/// An owned file descriptor for a socket
-///
-/// This file descriptor **must** be consumed by a `close` operation, otherwise will panic at
-/// run-time upon being dropped.
-pub struct SocketFd {
-    pub(crate) fd: crate::fd::OwnedFd,
-}
-impl SocketFd {
-    fn as_usize(&self) -> usize {
-        self.fd.as_raw_fd().try_into().unwrap()
     }
 }
 
@@ -164,11 +152,7 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
         // TODO: We can do reuse of fds if we maintained a free-list or similar; for now, we just
         // grab an entirely new fd anytime there is a new socket to be made.
 
-        let Ok(raw_fd) = self.handles.len().try_into() else {
-            // This will panic only if we have reached ~2 billion handles, which we should
-            // practically never really hit.
-            unreachable!()
-        };
+        let raw_fd = self.handles.len();
         self.handles.push(Some(SocketHandle {
             handle,
             protocol,
@@ -176,14 +160,14 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
         }));
 
         Ok(SocketFd {
-            fd: crate::fd::OwnedFd::new(raw_fd),
+            x: crate::fd::OwnedFd::new(raw_fd),
         })
     }
 
     /// Close the socket at `fd`
     pub fn close(&mut self, fd: SocketFd) -> Result<(), CloseError> {
         let mut socket_handle =
-            core::mem::take(&mut self.handles[fd.as_usize()]).ok_or(CloseError::InvalidFd)?;
+            core::mem::take(&mut self.handles[fd.x.as_usize()]).ok_or(CloseError::InvalidFd)?;
         let socket = self.socket_set.remove(socket_handle.handle);
         match socket {
             smoltcp::socket::Socket::Raw(_) | smoltcp::socket::Socket::Icmp(_) => {
@@ -200,7 +184,7 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
                 socket.abort();
             }
         }
-        let SocketFd { mut fd } = fd;
+        let SocketFd { x: mut fd } = fd;
         fd.mark_as_closed();
         Ok(())
     }
@@ -211,7 +195,7 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
             return Err(ConnectError::UnsupportedAddress(*addr));
         };
 
-        let socket_handle = self.handles[fd.as_usize()]
+        let socket_handle = self.handles[fd.x.as_usize()]
             .as_mut()
             .ok_or(ConnectError::InvalidFd)?;
 
@@ -256,7 +240,7 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
         buf: &[u8],
         flags: SendFlags,
     ) -> Result<usize, SendError> {
-        let socket_handle = self.handles[fd.as_usize()]
+        let socket_handle = self.handles[fd.x.as_usize()]
             .as_mut()
             .ok_or(SendError::InvalidFd)?;
 
@@ -283,7 +267,7 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
         buf: &mut [u8],
         flags: ReceiveFlags,
     ) -> Result<usize, ReceiveError> {
-        let socket_handle = self.handles[fd.as_usize()]
+        let socket_handle = self.handles[fd.x.as_usize()]
             .as_mut()
             .ok_or(ReceiveError::InvalidFd)?;
 
