@@ -5,9 +5,14 @@ use crate::path;
 use crate::platform;
 
 use bitflags::bitflags;
-use thiserror::Error;
 
 use core::ffi::c_uint;
+
+pub mod errors;
+
+use errors::{
+    ChmodError, CloseError, MkdirError, OpenError, ReadError, RmdirError, UnlinkError, WriteError,
+};
 
 /// The `FileSystem` provides access to all file-system related functionality provided by LiteBox.
 ///
@@ -15,14 +20,6 @@ use core::ffi::c_uint;
 pub struct FileSystem<Platform: platform::Provider> {
     platform: &'static Platform,
 }
-
-/// Possible errors from a [`FileSystem`]
-#[non_exhaustive]
-#[derive(Error, Debug)]
-pub enum FsError {}
-
-/// A convenience type-alias for filesytem results
-type Result<T> = core::result::Result<T, FsError>;
 
 impl<Platform: platform::Provider> FileSystem<Platform> {
     /// Construct a new `FileSystem` instance
@@ -40,7 +37,12 @@ impl<Platform: platform::Provider> FileSystem<Platform> {
     ///
     /// The `mode` is only significant when creating a file
     #[allow(clippy::needless_pass_by_value)] // `path::Arg` already accounts for references
-    pub fn open(&self, path: impl path::Arg, flags: OFlags, mode: Mode) -> Result<FileFd> {
+    pub fn open(
+        &self,
+        path: impl path::Arg,
+        flags: OFlags,
+        mode: Mode,
+    ) -> Result<FileFd, OpenError> {
         // NOTE: It is in functions like this that the platform's functionality can be used through
         // `self.platform` as part of the LiteBox implementation. Users of LiteBox do not need to be
         // concerned with how things connect to each other inside LiteBox, they simply maintain the
@@ -49,39 +51,39 @@ impl<Platform: platform::Provider> FileSystem<Platform> {
     }
 
     /// Close the file at `fd`
-    pub fn close(&self, fd: FileFd) -> Result<()> {
+    pub fn close(&self, fd: FileFd) -> Result<(), CloseError> {
         let mut fd = fd;
         fd.x.mark_as_closed();
         todo!()
     }
 
     /// Read from a file descriptor into a buffer
-    pub fn read(&self, fd: &FileFd, buf: &mut [u8]) -> Result<usize> {
+    pub fn read(&self, fd: &FileFd, buf: &mut [u8]) -> Result<usize, ReadError> {
         todo!()
     }
 
     /// Write from a buffer to a file descriptor
-    pub fn write(&self, fd: &FileFd, buf: &[u8]) -> Result<usize> {
+    pub fn write(&self, fd: &FileFd, buf: &[u8]) -> Result<usize, WriteError> {
         todo!()
     }
 
     /// Change the permissions of a file
-    pub fn chmod(&self, path: impl path::Arg, mode: Mode) -> Result<()> {
+    pub fn chmod(&self, path: impl path::Arg, mode: Mode) -> Result<(), ChmodError> {
         todo!()
     }
 
     /// Unlink a file
-    pub fn unlink(&self, path: impl path::Arg) -> Result<()> {
+    pub fn unlink(&self, path: impl path::Arg) -> Result<(), UnlinkError> {
         todo!()
     }
 
     /// Create a new directory
-    pub fn mkdir(&self, path: impl path::Arg, mode: Mode) -> Result<()> {
+    pub fn mkdir(&self, path: impl path::Arg, mode: Mode) -> Result<(), MkdirError> {
         todo!()
     }
 
     /// Remove a directory
-    pub fn rmdir(&self, path: impl path::Arg) -> Result<()> {
+    pub fn rmdir(&self, path: impl path::Arg) -> Result<(), RmdirError> {
         todo!()
     }
 }
