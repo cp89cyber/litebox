@@ -276,7 +276,11 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
         }
     }
 
-    /// Prepare a socket to accept incoming connections.
+    /// Prepare a socket to accept incoming connections. Marks the socket as a passive socket, such
+    /// that it will be used to accept new connection requests via [`accept`](Self::accept).
+    ///
+    /// The `backlog` argument defines the maximum length to which the queue of pending connections
+    /// the `fd` may grow.
     pub fn listen(&mut self, fd: &SocketFd, backlog: i32) -> Result<(), ListenError> {
         todo!()
     }
