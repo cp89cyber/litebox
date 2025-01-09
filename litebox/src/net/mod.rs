@@ -116,6 +116,36 @@ struct TcpSpecific {
 struct TcpServerSpecific {
     /// IP listening endpoint, if used as a server socket
     ip_listen_endpoint: smoltcp::wire::IpListenEndpoint,
+    /// Specified backlog via `listen`, no packets can be `accept`ed unless this is `Some`
+    backlog: Option<u16>,
+    /// Handles into the top-level `socket_set` for when things are `accept`ed.
+    socket_set_handles: Vec<smoltcp::iface::SocketHandle>,
+}
+
+impl TcpServerSpecific {
+    fn refill_to_backlog(&mut self, socket_set: &mut smoltcp::iface::SocketSet) {
+        let backlog = self.backlog.unwrap();
+        for _ in self.socket_set_handles.len()..backlog.into() {
+            let mut listening_socket = tcp::Socket::new(
+                smoltcp::storage::RingBuffer::new(vec![0u8; SOCKET_BUFFER_SIZE]),
+                smoltcp::storage::RingBuffer::new(vec![0u8; SOCKET_BUFFER_SIZE]),
+            );
+            match listening_socket.listen(self.ip_listen_endpoint) {
+                Ok(()) => {}
+                Err(tcp::ListenError::InvalidState) => {
+                    // Impossible, because we _just_ created a new tcp::Socket, which begins
+                    // in CLOSED state.
+                    unreachable!()
+                }
+                Err(tcp::ListenError::Unaddressable) => {
+                    // Impossible, since listen endpoint port is non 0.
+                    unreachable!()
+                }
+            };
+            self.socket_set_handles
+                .push(socket_set.add(listening_socket));
+        }
+    }
 }
 
 /// Socket-specific data for UDP sockets
@@ -272,11 +302,7 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
             }
         };
 
-        // TODO: We can do reuse of fds if we maintained a free-list or similar; for now, we just
-        // grab an entirely new fd anytime there is a new socket to be made.
-
-        let raw_fd = self.handles.len();
-        self.handles.push(Some(SocketHandle {
+        Ok(self.new_socket_fd_for(SocketHandle {
             handle,
             specific: match protocol {
                 Protocol::Tcp => ProtocolSpecific::Tcp(TcpSpecific {
@@ -287,11 +313,20 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
                 Protocol::Icmp => unimplemented!(),
                 Protocol::Raw { protocol } => unimplemented!(),
             },
-        }));
+        }))
+    }
 
-        Ok(SocketFd {
+    /// Creates a new [`SocketFd`] for a newly-created [`SocketHandle`].
+    fn new_socket_fd_for(&mut self, socket_handle: SocketHandle) -> SocketFd {
+        // TODO: We can do reuse of fds if we maintained a free-list or similar; for now, we just
+        // grab an entirely new fd anytime there is a new socket to be made.
+
+        let raw_fd = self.handles.len();
+        self.handles.push(Some(socket_handle));
+
+        SocketFd {
             x: crate::fd::OwnedFd::new(raw_fd),
-        })
+        }
     }
 
     /// Close the socket at `fd`
@@ -398,6 +433,8 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
                         addr: Some(smoltcp::wire::IpAddress::Ipv4(*addr.ip())),
                         port,
                     },
+                    backlog: None,
+                    socket_set_handles: vec![],
                 });
                 Ok(())
             }
@@ -411,14 +448,129 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider + 'static>
     /// that it will be used to accept new connection requests via [`accept`](Self::accept).
     ///
     /// The `backlog` argument defines the maximum length to which the queue of pending connections
-    /// the `fd` may grow.
-    pub fn listen(&mut self, fd: &SocketFd, backlog: i32) -> Result<(), ListenError> {
-        todo!()
+    /// the `fd` may grow. This function is allowed to silently cap the value to a reasonable upper
+    /// bound.
+    pub fn listen(&mut self, fd: &SocketFd, backlog: u16) -> Result<(), ListenError> {
+        let socket_handle = self.handles[fd.x.as_usize()]
+            .as_mut()
+            .ok_or(ListenError::InvalidFd)?;
+
+        if backlog == 0 {
+            // What should actually happen here?
+            unimplemented!()
+        }
+
+        // This prevents users from overloading things too badly; 4096 is the upper limit with
+        // similar silent-cap behavior since Linux 5.4 (earlier versions capped even smaller, at
+        // 128, but we use the larger value to be more flexible).
+        //
+        // We don't actively depend on this specific value, and it can be changed out at any time
+        // without any significant issue.
+        let backlog = backlog.min(4096);
+
+        match &mut socket_handle.specific {
+            ProtocolSpecific::Tcp(handle) => {
+                if handle.server_socket.is_none() {
+                    let local_port =
+                        self.local_port_allocator
+                            .ephemeral_port()
+                            .map_err(|e| match e {
+                                local_ports::LocalPortAllocationError::AlreadyInUse(_) => {
+                                    unreachable!()
+                                }
+                                local_ports::LocalPortAllocationError::NoAvailableFreePorts => {
+                                    ListenError::NoAvailableFreeEphemeralPorts
+                                }
+                            })?;
+                    let port = local_port.port();
+                    let old_local_port = handle.local_port.replace(local_port);
+                    if let Some(lp) = old_local_port {
+                        self.local_port_allocator.deallocate(lp);
+                        // Should anything else be done here?
+                        unimplemented!()
+                    }
+                    handle.server_socket = Some(TcpServerSpecific {
+                        ip_listen_endpoint: smoltcp::wire::IpListenEndpoint {
+                            addr: Some(smoltcp::wire::IpAddress::v4(0, 0, 0, 0)),
+                            port,
+                        },
+                        backlog: None,
+                        socket_set_handles: vec![],
+                    });
+                }
+                let Some(server_socket) = &mut handle.server_socket else {
+                    unreachable!()
+                };
+                if server_socket.ip_listen_endpoint.port == 0 {
+                    return Err(ListenError::InvalidAddress);
+                }
+                if server_socket.backlog.is_some() || !server_socket.socket_set_handles.is_empty() {
+                    // Need to change the amount of backlog; growing will just work, but truncating
+                    // might need some effort to pick which ones to keep/drop
+                    unimplemented!()
+                } else {
+                    server_socket.backlog = Some(backlog);
+                    server_socket.socket_set_handles = Vec::with_capacity(backlog.into());
+                }
+                server_socket.refill_to_backlog(&mut self.socket_set);
+                Ok(())
+            }
+            ProtocolSpecific::Udp(_) => unimplemented!(),
+            ProtocolSpecific::Icmp(_) => unimplemented!(),
+            ProtocolSpecific::Raw(_) => unimplemented!(),
+        }
     }
 
     /// Accept a new incoming connection on a listening socket.
     pub fn accept(&mut self, fd: &SocketFd) -> Result<SocketFd, AcceptError> {
-        todo!()
+        let socket_handle = self.handles[fd.x.as_usize()]
+            .as_mut()
+            .ok_or(AcceptError::InvalidFd)?;
+
+        match &mut socket_handle.specific {
+            ProtocolSpecific::Tcp(handle) => {
+                let Some(server_socket) = &mut handle.server_socket else {
+                    return Err(AcceptError::NotListening);
+                };
+                if server_socket.backlog.is_none() {
+                    return Err(AcceptError::NotListening);
+                };
+                // (Purely an optimization) remove all handles that are closed, by only keeping ones
+                // that are not closed
+                server_socket.socket_set_handles.retain(|&h| {
+                    let socket: &tcp::Socket = self.socket_set.get(h);
+                    socket.state() != tcp::State::Closed
+                });
+                // Find a socket that has progressed further in its TCP state machine, by finding a
+                // socket in a may-send-or-recv state
+                let Some(position) = server_socket.socket_set_handles.iter().position(|&h| {
+                    let socket: &tcp::Socket = self.socket_set.get(h);
+                    socket.may_send() || socket.may_recv()
+                }) else {
+                    return Err(AcceptError::NoConnectionsReady);
+                };
+                // Pull that position out of the listening handles
+                let ready_handle = server_socket.socket_set_handles.swap_remove(position);
+                // Refill to the backlog, so that we can have more listening sockets again if needed
+                server_socket.refill_to_backlog(&mut self.socket_set);
+                // Grab the local port again, so we can put it into the new `TcpSpecific`
+                let local_port = handle
+                    .local_port
+                    .as_ref()
+                    .map(|lp| self.local_port_allocator.allocate_same_local_port(lp));
+                // Create a new FD to hand it back out to the user
+                Ok(self.new_socket_fd_for(SocketHandle {
+                    handle: ready_handle,
+                    specific: ProtocolSpecific::Tcp(TcpSpecific {
+                        local_port,
+                        server_socket: None,
+                    }),
+                }))
+            }
+            ProtocolSpecific::Udp(_) => unimplemented!(),
+            ProtocolSpecific::Icmp(_) => unimplemented!(),
+            ProtocolSpecific::Raw(_) => unimplemented!(),
+        }
     }
 
     /// Send data over a connected socket.

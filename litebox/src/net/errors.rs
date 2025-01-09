@@ -55,12 +55,28 @@ pub enum BindError {
 /// Possible errors from [`Network::listen`]
 #[non_exhaustive]
 #[derive(Error, Debug)]
-pub enum ListenError {}
+pub enum ListenError {
+    #[error("Not a valid open file descriptor")]
+    InvalidFd,
+    #[error("Invalid address")]
+    InvalidAddress,
+    #[error("Socket is in invalid state")]
+    InvalidState,
+    #[error("No available free ephemeral ports")]
+    NoAvailableFreeEphemeralPorts,
+}
 
 /// Possible errors from [`Network::accept`]
 #[non_exhaustive]
 #[derive(Error, Debug)]
-pub enum AcceptError {}
+pub enum AcceptError {
+    #[error("Not a valid open file descriptor")]
+    InvalidFd,
+    #[error("🙉 Socket is not listening for connections")]
+    NotListening,
+    #[error("No connections ready to be accepted")]
+    NoConnectionsReady,
+}
 
 /// Possible errors from [`Network::send`]
 #[non_exhaustive]

@@ -62,6 +62,14 @@ impl LocalPortAllocator {
         }
     }
 
+    /// Increments the ref-count for a local port, producing a new `LocalPort` token to be used
+    #[must_use]
+    pub(crate) fn allocate_same_local_port(&mut self, port: &LocalPort) -> LocalPort {
+        // TODO(jayb): Definitely have to rethink this entire module now that I want this particular
+        // interface here.
+        todo!()
+    }
+
     /// Marks a [`LocalPort`] as available again, consuming it
     pub(crate) fn deallocate(&mut self, port: LocalPort) {
         let was_removed = self.allocated.remove(&port.port);
