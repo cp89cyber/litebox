@@ -21,8 +21,8 @@ flowchart TD
     rsl["Rust Shim Layer"]
     alloc{{Allocator}}
     lb["LiteBox"]
-    pflk["Linux Kernel Platform"]
-    pflu["Linux User Platform"]
+    pflk["Linux Kernel Platform-Host Shim Layer"]
+    pflu["Linux User Platform-Host Shim Layer"]
     hssnp["SEV SNP Host"]
     hslxu["Linux User Host"]
 
@@ -53,8 +53,8 @@ flowchart TD
         pflu
     end
 
-    pflk-->|Host interface|hssnp
-    pflu-->|Host interface|hslxu
+    pflk-->|Linux kernel host interface|hssnp
+    pflu-->|Linux user host interface|hslxu
 
     subgraph "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"
         hssnp
