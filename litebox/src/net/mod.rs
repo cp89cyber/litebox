@@ -44,6 +44,9 @@ const MAX_PACKET_COUNT: usize = 32;
 /// The `Network` provides access to all networking related functionality provided by LiteBox.
 ///
 /// A LiteBox `Network` is parametric in the platform it runs on.
+///
+/// An important decision that must be made by a user of a `Network` is decided by
+/// [`set_platform_interaction`](Self::set_platform_interaction), whose docs explain this further.
 pub struct Network<'platform, Platform: platform::IPInterfaceProvider + platform::TimeProvider> {
     platform: &'platform Platform,
     /// The set of sockets
@@ -61,6 +64,8 @@ pub struct Network<'platform, Platform: platform::IPInterfaceProvider + platform
     /// An allocator for local ports
     // TODO: Maybe we should have separate allocators for TCP, UDP, ...?
     local_port_allocator: LocalPortAllocator,
+    /// Whether outside interaction is automatic or manual
+    platform_interaction: PlatformInteraction,
 }
 
 impl<'platform, Platform: platform::IPInterfaceProvider + platform::TimeProvider>
@@ -100,6 +105,7 @@ impl<'platform, Platform: platform::IPInterfaceProvider + platform::TimeProvider
             interface,
             zero_time: platform.now(),
             local_port_allocator: LocalPortAllocator::new(),
+            platform_interaction: PlatformInteraction::Automatic,
         }
     }
 }
@@ -266,6 +272,149 @@ impl ProtocolSpecific {
     }
 }
 
+/// Whether [`Network::perform_platform_interaction`] needs to be manually invoked or not.
+pub enum PlatformInteraction {
+    /// Automatically (internally) invoked whenever any calls like `send`/`recv`/... are made.
+    Automatic,
+    /// Requires manually (periodically) invoking [`Network::perform_platform_interaction`]
+    Manual,
+}
+
+#[derive(Clone, Copy)]
+enum PollDirection {
+    Ingress,
+    Egress,
+    Both,
+}
+impl PollDirection {
+    fn ingress(self) -> bool {
+        matches!(self, PollDirection::Ingress | PollDirection::Both)
+    }
+    fn egress(self) -> bool {
+        matches!(self, PollDirection::Egress | PollDirection::Both)
+    }
+}
+
+/// Advice on when to invoke [`Network::perform_platform_interaction`] again.
+///
+/// It is perfectly ok to ignore this advice by calling things sooner (say, in a tight loop).
+/// Specifically, it is harmless (but wastes energy) to call for interaction again sooner than
+/// advised. In contrast, it _may_ be harmful (impacting quality of service) to call it later than
+/// requested.
+#[derive(Clone, Copy, Debug)]
+pub enum PlatformInteractionReinvocationAdvice {
+    /// It is likely helpful to call again immediately, without any delay. The function has returned
+    /// control back to you to prevent unbounded length waits (crucial to prevent in
+    /// non-pre-emptible environments), but otherwise has more work it anticipates it can do.
+    CallAgainImmediately,
+    /// You don't need to call again until more packets arrive on the device's receive side or if
+    /// any socket interaction has occurred.
+    WaitOnDeviceOrSocketInteraction,
+}
+impl PlatformInteractionReinvocationAdvice {
+    /// Convenience function to match against [`Self::CallAgainImmediately`]
+    #[must_use]
+    pub fn call_again_immediately(self) -> bool {
+        matches!(self, Self::CallAgainImmediately)
+    }
+}
+
+impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'_, Platform> {
+    /// Sets the interaction with the outside world to `platform_interaction`.
+    ///
+    /// If this is set to automatic, then a user of the network does not need to worry about
+    /// scheduling or calling [`perform_platform_interaction`](Self::perform_platform_interaction).
+    /// However, this may reduce predictability in terms of how quickly LiteBox responds to calls,
+    /// since any network calls may incur non-trivial performance penalty.
+    ///
+    /// On the other hand, more performance can be had in scenarios that can support (say) a
+    /// separate thread that repeatedly invokes
+    /// [`perform_platform_interaction`](Self::perform_platform_interaction), or in scenarios where
+    /// the user wants greater control over _when_ processing is performed, if done synchronously.
+    ///
+    /// By default, for convenience, the default setting (if this function is not invoked) is
+    /// [`PlatformInteraction::Automatic`].
+    pub fn set_platform_interaction(&mut self, platform_interaction: PlatformInteraction) {
+        self.platform_interaction = platform_interaction;
+    }
+
+    /// Performs queued interactions with the outside world.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if run without first using [`Self::set_platform_interaction`] to set
+    /// interactions to manual.
+    pub fn perform_platform_interaction(&mut self) -> PlatformInteractionReinvocationAdvice {
+        assert!(
+            matches!(self.platform_interaction, PlatformInteraction::Manual),
+            "Requires manual-mode interactions"
+        );
+        self.internal_perform_platform_interaction(PollDirection::Both)
+    }
+
+    /// (Internal-only API) Actually perform the queued interactions with the outside world.
+    fn internal_perform_platform_interaction(
+        &mut self,
+        direction: PollDirection,
+    ) -> PlatformInteractionReinvocationAdvice {
+        let timestamp = self.now();
+        let mut socket_state_changed = false;
+        let ingress_advice = if direction.ingress() {
+            match self.interface.poll_ingress_single(
+                timestamp,
+                &mut self.device,
+                &mut self.socket_set,
+            ) {
+                smoltcp::iface::PollIngressSingleResult::None => {
+                    Some(PlatformInteractionReinvocationAdvice::WaitOnDeviceOrSocketInteraction)
+                }
+                smoltcp::iface::PollIngressSingleResult::PacketProcessed => {
+                    Some(PlatformInteractionReinvocationAdvice::CallAgainImmediately)
+                }
+                smoltcp::iface::PollIngressSingleResult::SocketStateChanged => {
+                    socket_state_changed = true;
+                    Some(PlatformInteractionReinvocationAdvice::CallAgainImmediately)
+                }
+            }
+        } else {
+            None
+        };
+        if direction.egress() {
+            match self
+                .interface
+                .poll_egress(timestamp, &mut self.device, &mut self.socket_set)
+            {
+                smoltcp::iface::PollResult::None => {}
+                smoltcp::iface::PollResult::SocketStateChanged => {
+                    socket_state_changed = true;
+                }
+            }
+        };
+        if socket_state_changed {
+            PlatformInteractionReinvocationAdvice::CallAgainImmediately
+        } else {
+            ingress_advice
+                .unwrap_or(PlatformInteractionReinvocationAdvice::WaitOnDeviceOrSocketInteraction)
+        }
+    }
+
+    /// (Internal-only API) Perform the queued interactions only in automatic mode.
+    fn automated_platform_interaction(&mut self, direction: PollDirection) {
+        match self.platform_interaction {
+            PlatformInteraction::Automatic => {
+                while self
+                    .internal_perform_platform_interaction(direction)
+                    .call_again_immediately()
+                {
+                    // We just loop until all platform interaction is completed, _roughly_ analogous
+                    // to smoltcp's `poll`.
+                }
+            }
+            PlatformInteraction::Manual => {}
+        }
+    }
+}
+
 impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'_, Platform> {
     /// Explicitly private-only function that returns the current (smoltcp) Instant, relative to the
     /// initialized arbitrary 0-point in time.
@@ -380,6 +529,7 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'
         }
         let SocketFd { x: mut fd } = fd;
         fd.mark_as_closed();
+        self.automated_platform_interaction(PollDirection::Both);
         Ok(())
     }
 
@@ -410,12 +560,14 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'
                     // Need to think about how to handle this situation
                     unimplemented!()
                 }
-                Ok(())
             }
             Protocol::Udp => unimplemented!(),
             Protocol::Icmp => unimplemented!(),
             Protocol::Raw { protocol } => unimplemented!(),
         }
+
+        self.automated_platform_interaction(PollDirection::Both);
+        Ok(())
     }
 
     /// Bind a socket to a specific address and port.
@@ -470,12 +622,14 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'
                     backlog: None,
                     socket_set_handles: vec![],
                 });
-                Ok(())
             }
             Protocol::Udp => unimplemented!(),
             Protocol::Icmp => unimplemented!(),
             Protocol::Raw { protocol } => unimplemented!(),
         }
+
+        self.automated_platform_interaction(PollDirection::Both);
+        Ok(())
     }
 
     /// Prepare a socket to accept incoming connections. Marks the socket as a passive socket, such
@@ -547,12 +701,13 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'
                     server_socket.socket_set_handles = Vec::with_capacity(backlog.into());
                 }
                 server_socket.refill_to_backlog(&mut self.socket_set);
-                Ok(())
             }
             ProtocolSpecific::Udp(_) => unimplemented!(),
             ProtocolSpecific::Icmp(_) => unimplemented!(),
             ProtocolSpecific::Raw(_) => unimplemented!(),
         }
+        self.automated_platform_interaction(PollDirection::Ingress);
+        Ok(())
     }
 
     /// Accept a new incoming connection on a listening socket.
@@ -592,6 +747,8 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'
                     .local_port
                     .as_ref()
                     .map(|lp| self.local_port_allocator.allocate_same_local_port(lp));
+                // Trigger some automated platform interaction, to keep things flowing
+                self.automated_platform_interaction(PollDirection::Both);
                 // Create a new FD to hand it back out to the user
                 Ok(self.new_socket_fd_for(SocketHandle {
                     handle: ready_handle,
@@ -622,7 +779,7 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'
             unimplemented!()
         }
 
-        match socket_handle.protocol() {
+        let ret = match socket_handle.protocol() {
             Protocol::Tcp => self
                 .socket_set
                 .get_mut::<tcp::Socket>(socket_handle.handle)
@@ -631,7 +788,9 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'
             Protocol::Udp => unimplemented!(),
             Protocol::Icmp => unimplemented!(),
             Protocol::Raw { protocol } => unimplemented!(),
-        }
+        };
+        self.automated_platform_interaction(PollDirection::Egress);
+        ret
     }
 
     /// Receive data from a connected socket.
@@ -641,6 +800,10 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'
         buf: &mut [u8],
         flags: ReceiveFlags,
     ) -> Result<usize, ReceiveError> {
+        // Note that we do an earlier-than-usual automated interaction to ingress packets since it
+        // doesn't hurt to do this too often (other than wasting energy), and this allows us to
+        // possibly get packets where we might otherwise return with size 0 on the `receive`.
+        self.automated_platform_interaction(PollDirection::Ingress);
         let socket_handle = self.handles[fd.x.as_usize()]
             .as_mut()
             .ok_or(ReceiveError::InvalidFd)?;
@@ -649,7 +812,7 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'
             unimplemented!()
         }
 
-        match socket_handle.protocol() {
+        let ret = match socket_handle.protocol() {
             Protocol::Tcp => self
                 .socket_set
                 .get_mut::<tcp::Socket>(socket_handle.handle)
@@ -661,7 +824,9 @@ impl<Platform: platform::IPInterfaceProvider + platform::TimeProvider> Network<'
             Protocol::Udp => unimplemented!(),
             Protocol::Icmp => unimplemented!(),
             Protocol::Raw { protocol } => unimplemented!(),
-        }
+        };
+        self.automated_platform_interaction(PollDirection::Ingress);
+        ret
     }
 }
 

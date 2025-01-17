@@ -7,11 +7,7 @@ use core::str::FromStr;
 
 extern crate std;
 
-#[test]
-fn test_bidirectional_tcp_communication() {
-    let platform = MockPlatform::new();
-    let mut network = Network::new(&platform);
-
+fn bidi_tcp_comms(mut network: Network<MockPlatform>, comms: fn(&mut Network<MockPlatform>)) {
     // Create a listening socket
     let listener_fd = network
         .socket(Protocol::Tcp)
@@ -25,17 +21,6 @@ fn test_bidirectional_tcp_communication() {
         .listen(&listener_fd, 1)
         .expect("Failed to listen on TCP socket");
 
-    // Simulate the network processing to establish the connection
-    // TODO(jayb): Cleanup
-    for _ in 0..100 {
-        match network
-            .interface
-            .poll(network.now(), &mut network.device, &mut network.socket_set)
-        {
-            smoltcp::iface::PollResult::None | smoltcp::iface::PollResult::SocketStateChanged => {}
-        }
-    }
-
     // Create a connecting socket
     let client_fd = network
         .socket(Protocol::Tcp)
@@ -44,16 +29,7 @@ fn test_bidirectional_tcp_communication() {
         .connect(&client_fd, &listen_addr)
         .expect("Failed to connect TCP socket");
 
-    // Simulate the network processing to establish the connection
-    // TODO(jayb): Cleanup
-    for _ in 0..100 {
-        match network
-            .interface
-            .poll(network.now(), &mut network.device, &mut network.socket_set)
-        {
-            smoltcp::iface::PollResult::None | smoltcp::iface::PollResult::SocketStateChanged => {}
-        }
-    }
+    comms(&mut network);
 
     // Accept the connection on the listening socket
     let server_fd = network
@@ -67,16 +43,7 @@ fn test_bidirectional_tcp_communication() {
         .expect("Failed to send data");
     assert_eq!(bytes_sent, client_to_server_data.len());
 
-    // Simulate the network processing to establish the connection
-    // TODO(jayb): Cleanup
-    for _ in 0..100 {
-        match network
-            .interface
-            .poll(network.now(), &mut network.device, &mut network.socket_set)
-        {
-            smoltcp::iface::PollResult::None | smoltcp::iface::PollResult::SocketStateChanged => {}
-        }
-    }
+    comms(&mut network);
 
     // Receive data on the server
     let mut server_buffer = [0u8; 1024];
@@ -92,16 +59,7 @@ fn test_bidirectional_tcp_communication() {
         .expect("Failed to send data");
     assert_eq!(bytes_sent, server_to_client_data.len());
 
-    // Simulate the network processing to establish the connection
-    // TODO(jayb): Cleanup
-    for _ in 0..100 {
-        match network
-            .interface
-            .poll(network.now(), &mut network.device, &mut network.socket_set)
-        {
-            smoltcp::iface::PollResult::None | smoltcp::iface::PollResult::SocketStateChanged => {}
-        }
-    }
+    comms(&mut network);
 
     // Receive data on the client
     let mut client_buffer = [0u8; 1024];
@@ -113,4 +71,29 @@ fn test_bidirectional_tcp_communication() {
     network.close(client_fd);
     network.close(server_fd);
     network.close(listener_fd);
+}
+
+#[test]
+fn test_bidirectional_tcp_communication_default() {
+    let platform = MockPlatform::new();
+    let network = Network::new(&platform);
+    bidi_tcp_comms(network, |_| {});
+}
+
+#[test]
+fn test_bidirectional_tcp_communication_manual() {
+    let platform = MockPlatform::new();
+    let mut network = Network::new(&platform);
+    network.set_platform_interaction(PlatformInteraction::Manual);
+    bidi_tcp_comms(network, |nw| {
+        while nw.perform_platform_interaction().call_again_immediately() {}
+    });
+}
+
+#[test]
+fn test_bidirectional_tcp_communication_automatic() {
+    let platform = MockPlatform::new();
+    let mut network = Network::new(&platform);
+    network.set_platform_interaction(PlatformInteraction::Automatic);
+    bidi_tcp_comms(network, |_| {});
 }
