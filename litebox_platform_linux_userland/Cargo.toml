@@ -1,5 +1,5 @@
 [package]
-name = "litebox-platform-linux-userland"
+name = "litebox_platform_linux_userland"
 version = "0.1.0"
 edition = "2021"
 

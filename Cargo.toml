@@ -2,5 +2,5 @@
 resolver = "2"
 members = [
     "litebox",
-    "litebox-platform-linux-userland",
+    "litebox_platform_linux_userland",
 ]
