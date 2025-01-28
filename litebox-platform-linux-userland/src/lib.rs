@@ -4,7 +4,6 @@
 // but we _may_ allow for more in the future, if we find it useful to do so.
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use std::marker::PhantomData;
 use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering::SeqCst;
@@ -18,16 +17,18 @@ use litebox::platform::UnblockedOrTimedOut;
 /// This implements the main [`litebox::platform::Provider`] trait, i.e., implements all platform
 /// traits. Notably, however, it supports parametric punchtrough (defaulted to impossible
 /// punchtrough).
-pub struct LinuxUserland<Punchthrough: litebox::platform::Punchthrough = litebox::platform::trivial_providers::ImpossiblePunchthrough> {
+pub struct LinuxUserland<PunchthroughProvider: litebox::platform::PunchthroughProvider = litebox::platform::trivial_providers::ImpossiblePunchthroughProvider> {
     tun_socket_fd: std::os::fd::OwnedFd,
-    punchthrough: PhantomData<Punchthrough>,
+    punchthrough_provider: PunchthroughProvider,
 }
 
-impl LinuxUserland {
+impl<PunchthroughProvider: litebox::platform::PunchthroughProvider>
+    LinuxUserland<PunchthroughProvider>
+{
     /// Create a new userland-Linux platform for use in `LiteBox`.
     ///
     /// Takes a tun device name (such as `"tun0"` or `"tun99"`) to connect networking.
-    pub fn new(tun_device_name: &str) -> Self {
+    pub fn new(tun_device_name: &str, punchthrough_provider: PunchthroughProvider) -> Self {
         let tun_socket_fd = {
             let tun_fd = nix::fcntl::open(
                 "/dev/net/tun",
@@ -65,18 +66,18 @@ impl LinuxUserland {
 
         Self {
             tun_socket_fd,
-            punchthrough: PhantomData,
+            punchthrough_provider,
         }
     }
 }
 
-impl<Punchthrough: litebox::platform::Punchthrough> litebox::platform::Provider
-    for LinuxUserland<Punchthrough>
+impl<PunchthroughProvider: litebox::platform::PunchthroughProvider> litebox::platform::Provider
+    for LinuxUserland<PunchthroughProvider>
 {
 }
 
-impl<Punchthrough: litebox::platform::Punchthrough> litebox::platform::RawMutexProvider
-    for LinuxUserland<Punchthrough>
+impl<PunchthroughProvider: litebox::platform::PunchthroughProvider>
+    litebox::platform::RawMutexProvider for LinuxUserland<PunchthroughProvider>
 {
     type RawMutex = RawMutex;
 
@@ -292,8 +293,8 @@ impl litebox::platform::RawMutex for RawMutex {
     }
 }
 
-impl<Punchthrough: litebox::platform::Punchthrough> litebox::platform::IPInterfaceProvider
-    for LinuxUserland<Punchthrough>
+impl<PunchthroughProvider: litebox::platform::PunchthroughProvider>
+    litebox::platform::IPInterfaceProvider for LinuxUserland<PunchthroughProvider>
 {
     fn send_ip_packet(&self, packet: &[u8]) -> Result<(), litebox::platform::SendError> {
         match nix::unistd::write(&self.tun_socket_fd, packet) {
@@ -323,8 +324,8 @@ impl<Punchthrough: litebox::platform::Punchthrough> litebox::platform::IPInterfa
     }
 }
 
-impl<Punchthrough: litebox::platform::Punchthrough> litebox::platform::TimeProvider
-    for LinuxUserland<Punchthrough>
+impl<PunchthroughProvider: litebox::platform::PunchthroughProvider> litebox::platform::TimeProvider
+    for LinuxUserland<PunchthroughProvider>
 {
     type Instant = Instant;
 
@@ -345,14 +346,24 @@ impl litebox::platform::Instant for Instant {
     }
 }
 
-impl<Punchthrough: litebox::platform::Punchthrough> litebox::platform::PunchthroughProvider
-    for LinuxUserland<Punchthrough>
+impl<PunchthroughProvider: litebox::platform::PunchthroughProvider>
+    litebox::platform::PunchthroughProvider for LinuxUserland<PunchthroughProvider>
 {
-    type Punchthrough = Punchthrough;
+    type PunchthroughToken = PunchthroughProvider::PunchthroughToken;
+
+    fn get_punchthrough_token_for(
+        &mut self,
+        punchthrough: <Self::PunchthroughToken as litebox::platform::PunchthroughToken>::Punchthrough,
+    ) -> Option<Self::PunchthroughToken> {
+        // TODO(jayb): We may wish to make the linux userland platform less generic, and support a
+        // _specific_ syscall-based punchthrough interface?
+        self.punchthrough_provider
+            .get_punchthrough_token_for(punchthrough)
+    }
 }
 
-impl<Punchthrough: litebox::platform::Punchthrough> litebox::platform::DebugLogProvider
-    for LinuxUserland<Punchthrough>
+impl<PunchthroughProvider: litebox::platform::PunchthroughProvider>
+    litebox::platform::DebugLogProvider for LinuxUserland<PunchthroughProvider>
 {
     fn debug_log_print(&self, msg: &str) {
         eprint!("{msg}")

@@ -112,7 +112,13 @@ impl TimeProvider for MockPlatform {
 }
 
 impl PunchthroughProvider for MockPlatform {
-    type Punchthrough = trivial_providers::ImpossiblePunchthrough;
+    type PunchthroughToken = trivial_providers::ImpossiblePunchthroughToken;
+    fn get_punchthrough_token_for(
+        &mut self,
+        punchthrough: <Self::PunchthroughToken as PunchthroughToken>::Punchthrough,
+    ) -> Option<Self::PunchthroughToken> {
+        None
+    }
 }
 
 impl DebugLogProvider for MockPlatform {

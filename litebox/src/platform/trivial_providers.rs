@@ -3,12 +3,21 @@
 //! Most users of LiteBox may possibly need more featureful providers, provided by other crates;
 //! however, some users might find these sufficient for their use case.
 
-use super::{Punchthrough, PunchthroughError, PunchthroughProvider};
+use super::{Punchthrough, PunchthroughError, PunchthroughProvider, PunchthroughToken};
 
 /// A trivial provider, useful when no punchthrough is necessary.
 pub struct ImpossiblePunchthroughProvider {}
 impl PunchthroughProvider for ImpossiblePunchthroughProvider {
-    type Punchthrough = ImpossiblePunchthrough;
+    type PunchthroughToken = ImpossiblePunchthroughToken;
+    fn get_punchthrough_token_for(
+        &mut self,
+        punchthrough: <Self::PunchthroughToken as PunchthroughToken>::Punchthrough,
+    ) -> Option<Self::PunchthroughToken> {
+        // Since `ImpossiblePunchthrough` is an empty enum, it is impossible to actually invoke
+        // `execute` upon it, meaning that the implementation here is irrelevant, since anything
+        // within it is provably unreachable.
+        unreachable!()
+    }
 }
 /// A [`Punchthrough`] for [`ImpossiblePunchthroughProvider`]
 pub enum ImpossiblePunchthrough {}
@@ -17,8 +26,18 @@ impl Punchthrough for ImpossiblePunchthrough {
     // Rust. Since `Infallible` has no variant, a value of this type can never actually exist.
     type ReturnSuccess = core::convert::Infallible;
     type ReturnFailure = core::convert::Infallible;
-    fn execute(self) -> Result<Self::ReturnSuccess, PunchthroughError<Self::ReturnFailure>> {
-        // Since `ImpossiblePunchthrough` is an empty enum, it is impossible to actually invoke
+}
+/// A [`PunchthroughToken`] for [`ImpossiblePunchthrough`]
+pub enum ImpossiblePunchthroughToken {}
+impl PunchthroughToken for ImpossiblePunchthroughToken {
+    type Punchthrough = ImpossiblePunchthrough;
+    fn execute(
+        self,
+    ) -> Result<
+        <Self::Punchthrough as Punchthrough>::ReturnSuccess,
+        PunchthroughError<<Self::Punchthrough as Punchthrough>::ReturnFailure>,
+    > {
+        // Since `ImpossiblePunchthroughToken` is an empty enum, it is impossible to actually invoke
         // `execute` upon it, meaning that the implementation here is irrelevant, since anything
         // within it is provably unreachable.
         unreachable!()
@@ -29,7 +48,13 @@ impl Punchthrough for ImpossiblePunchthrough {
 /// simply caught as "unimplemented" temporarily, while more infrastructure is set up.
 pub struct IgnoredPunchthroughProvider {}
 impl PunchthroughProvider for IgnoredPunchthroughProvider {
-    type Punchthrough = IgnoredPunchthrough;
+    type PunchthroughToken = IgnoredPunchthroughToken;
+    fn get_punchthrough_token_for(
+        &mut self,
+        punchthrough: <Self::PunchthroughToken as PunchthroughToken>::Punchthrough,
+    ) -> Option<Self::PunchthroughToken> {
+        Some(IgnoredPunchthroughToken { punchthrough })
+    }
 }
 /// A [`Punchthrough`] for [`IgnoredPunchthroughProvider`]
 pub struct IgnoredPunchthrough {
@@ -38,8 +63,20 @@ pub struct IgnoredPunchthrough {
 impl Punchthrough for IgnoredPunchthrough {
     type ReturnSuccess = Underspecified;
     type ReturnFailure = Underspecified;
-    fn execute(self) -> Result<Self::ReturnSuccess, PunchthroughError<Self::ReturnFailure>> {
-        Err(PunchthroughError::Unimplemented(self.data))
+}
+/// A [`PunchthroughToken`] for [`IgnoredPunchthrough`]
+pub struct IgnoredPunchthroughToken {
+    punchthrough: IgnoredPunchthrough,
+}
+impl PunchthroughToken for IgnoredPunchthroughToken {
+    type Punchthrough = IgnoredPunchthrough;
+    fn execute(
+        self,
+    ) -> Result<
+        <Self::Punchthrough as Punchthrough>::ReturnSuccess,
+        PunchthroughError<<Self::Punchthrough as Punchthrough>::ReturnFailure>,
+    > {
+        Err(PunchthroughError::Unimplemented(self.punchthrough.data))
     }
 }
 

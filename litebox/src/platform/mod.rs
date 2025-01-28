@@ -24,8 +24,38 @@ pub trait Provider:
 
 /// Punch through any functionality for a particular platform that is not explicitly part of the
 /// common _shared_ platform interface.
+///
+/// The punchthrough primarily exists to improve auditability, rather than preventing arbitrary
+/// calls outside of the common interface, since it is impossible in Rust to prevent arbitrary
+/// external calls. Thus, it should not be thought of as a security boundary. However, this should
+/// be treated closer to "if someone is invoking things from the host without passing through a
+/// punchthrough, their code is suspicious; if all host invocations pass through the punchthrough,
+/// then it is sufficient to audit the punchthrough interface".
 pub trait PunchthroughProvider {
+    type PunchthroughToken: PunchthroughToken;
+    /// Give permission token to invoke `punchthrough`, possibly after checking that it is ok.
+    ///
+    /// The reason `&mut self` is taken mutably is to ensure that tokens aren't being held around
+    /// for too long (i.e., all other platform interaction is disallowed between the creation and
+    /// consumption of a token), as well as allowing the token to (possibly) get mutable access to
+    /// the underlying platform storage.
+    fn get_punchthrough_token_for(
+        &mut self,
+        punchthrough: <Self::PunchthroughToken as PunchthroughToken>::Punchthrough,
+    ) -> Option<Self::PunchthroughToken>;
+}
+
+/// A token that demonstrates that the platform is allowing access for a particular [`Punchthrough`]
+/// to occur (at that point, or at some indeterminate point in the future).
+pub trait PunchthroughToken {
     type Punchthrough: Punchthrough;
+    /// Consume the token, and invoke the underlying punchthrough that it represented.
+    fn execute(
+        self,
+    ) -> Result<
+        <Self::Punchthrough as Punchthrough>::ReturnSuccess,
+        PunchthroughError<<Self::Punchthrough as Punchthrough>::ReturnFailure>,
+    >;
 }
 
 /// Punchthrough support allowing access to functionality not captured by [`Provider`].
@@ -33,10 +63,11 @@ pub trait PunchthroughProvider {
 /// Ideally, this is implemented by a (possibly `#[non_exhaustive]`) enum where a platform
 /// provider can mark any unsupported/unimplemented punchthrough functionality with a
 /// [`PunchthroughError::Unsupported`] or [`PunchthroughError::Unimplemented`].
+///
+/// The `Token` allows for obtaining permission from (and possibly, mutable access to) the platform
 pub trait Punchthrough {
     type ReturnSuccess;
     type ReturnFailure: core::error::Error;
-    fn execute(self) -> Result<Self::ReturnSuccess, PunchthroughError<Self::ReturnFailure>>;
 }
 
 /// Possible errors for a [`Punchthrough`]
@@ -63,15 +94,19 @@ pub enum EitherError<L: core::error::Error, R: core::error::Error> {
 // punchthroughs. An implementation of punchthrough could follow a similar implementation to
 // obtain easy internal composability, but composing across crates providing punchthroughs is
 // likely best provided using this `Either` based composition.
-impl<L, R> Punchthrough for Either<L, R>
+impl<L, R> PunchthroughToken for Either<L, R>
 where
-    L: Punchthrough,
-    R: Punchthrough,
+    L: PunchthroughToken,
+    R: PunchthroughToken,
 {
-    type ReturnSuccess = Either<L::ReturnSuccess, R::ReturnSuccess>;
-    type ReturnFailure = EitherError<L::ReturnFailure, R::ReturnFailure>;
+    type Punchthrough = Either<L::Punchthrough, R::Punchthrough>;
 
-    fn execute(self) -> Result<Self::ReturnSuccess, PunchthroughError<Self::ReturnFailure>> {
+    fn execute(
+        self,
+    ) -> Result<
+        <Self::Punchthrough as Punchthrough>::ReturnSuccess,
+        PunchthroughError<<Self::Punchthrough as Punchthrough>::ReturnFailure>,
+    > {
         match self {
             Either::Left(l) => match l.execute() {
                 Ok(res) => Ok(Either::Left(res)),
@@ -95,6 +130,15 @@ where
             },
         }
     }
+}
+
+impl<L, R> Punchthrough for Either<L, R>
+where
+    L: Punchthrough,
+    R: Punchthrough,
+{
+    type ReturnSuccess = Either<L::ReturnSuccess, R::ReturnSuccess>;
+    type ReturnFailure = EitherError<L::ReturnFailure, R::ReturnFailure>;
 }
 
 /// A provider of raw mutexes
