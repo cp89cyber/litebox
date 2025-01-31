@@ -61,12 +61,15 @@ impl<Platform: sync::RawSyncPrimitivesProvider> FileSystem<'_, Platform> {
     //
     // Note: does NOT account for symlinks.
     fn absolute_path(&self, path: impl crate::path::Arg) -> Result<String, PathError> {
-        // Since cwd always ends with `/`, if the provided path is a relative path, it'll do the
-        // right thing; if it is an absolute path, it'll lead to a `//`, which the normalizer will
-        // correctly ignore everything before it. Thus, it is sufficient to simply concatenate and
-        // normalize.
         assert!(self.current_working_dir.ends_with('/'));
-        Ok((self.current_working_dir.clone() + path.as_rust_str()?).normalized()?)
+        let path = path.as_rust_str()?;
+        if path.starts_with('/') {
+            // Absolute path
+            Ok(path.normalized()?)
+        } else {
+            // Relative path
+            Ok((self.current_working_dir.clone() + path.as_rust_str()?).normalized()?)
+        }
     }
 }
 

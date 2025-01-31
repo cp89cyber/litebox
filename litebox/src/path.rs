@@ -61,29 +61,21 @@ pub trait Arg: private::Sealed {
     /// This is similar to [`Self::components`] except with normalization. Look at the tests for
     /// details on normalization.
     fn normalized_components(&self) -> Result<impl Iterator<Item = &str>> {
-        let mut drop_rest = false;
         let mut parent_count = 0;
         let mut rev_norm_components = self
             .as_rust_str()?
             .rsplit('/')
-            .filter(|&component| {
-                !drop_rest
-                    && match component {
-                        "" => {
-                            drop_rest = true;
-                            false
-                        }
-                        "." => false,
-                        ".." => {
-                            parent_count += 1;
-                            false
-                        }
-                        _ if parent_count > 0 => {
-                            parent_count -= 1;
-                            false
-                        }
-                        _ => true,
-                    }
+            .filter(|&component| match component {
+                "" | "." => false,
+                ".." => {
+                    parent_count += 1;
+                    false
+                }
+                _ if parent_count > 0 => {
+                    parent_count -= 1;
+                    false
+                }
+                _ => true,
             })
             .collect::<alloc::vec::Vec<_>>();
         rev_norm_components.extend(core::iter::repeat_n("..", parent_count));
@@ -222,7 +214,7 @@ mod tests {
                 .normalized_components()
                 .unwrap()
                 .collect::<Vec<_>>(),
-            vec!["baz"],
+            vec!["..", "bar", "baz"],
         );
     }
 }
