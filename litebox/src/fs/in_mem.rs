@@ -55,11 +55,18 @@ impl<Platform: sync::RawSyncPrimitivesProvider> super::private::Sealed
 {
 }
 
-// TODO: Path traversal logic likely needs updates once we support chdir
-
 impl<Platform: sync::RawSyncPrimitivesProvider> FileSystem<'_, Platform> {
-    fn real_path(&self, path: impl crate::path::Arg) -> Result<String, PathError> {
-        todo!()
+    // Gives the absolute path for `path`, resolving any `.` or `..`s, and making sure to account
+    // for any relative paths from current working directory.
+    //
+    // Note: does NOT account for symlinks.
+    fn absolute_path(&self, path: impl crate::path::Arg) -> Result<String, PathError> {
+        // Since cwd always ends with `/`, if the provided path is a relative path, it'll do the
+        // right thing; if it is an absolute path, it'll lead to a `//`, which the normalizer will
+        // correctly ignore everything before it. Thus, it is sufficient to simply concatenate and
+        // normalize.
+        assert!(self.current_working_dir.ends_with('/'));
+        Ok((self.current_working_dir.clone() + path.as_rust_str()?).normalized()?)
     }
 }
 
@@ -70,7 +77,6 @@ impl<Platform: sync::RawSyncPrimitivesProvider> super::FileSystem for FileSystem
         flags: super::OFlags,
         mode: super::Mode,
     ) -> Result<crate::fd::FileFd, OpenError> {
-        let path = path.as_rust_str();
         todo!()
     }
 
@@ -95,8 +101,8 @@ impl<Platform: sync::RawSyncPrimitivesProvider> super::FileSystem for FileSystem
     }
 
     fn mkdir(&self, path: impl crate::path::Arg, mode: super::Mode) -> Result<(), MkdirError> {
+        let path = self.absolute_path(path)?;
         let mut root = self.root.write();
-        let path = path.normalized().or(Err(PathError::InvalidPathname))?;
         let (parent, entry) = root.parent_and_entry_mut(&path, self.current_user)?;
         let Some((parent_path, parent)) = parent else {
             // Attempted to make `/`
@@ -123,8 +129,8 @@ impl<Platform: sync::RawSyncPrimitivesProvider> super::FileSystem for FileSystem
     }
 
     fn rmdir(&self, path: impl crate::path::Arg) -> Result<(), RmdirError> {
+        let path = self.absolute_path(path)?;
         let mut root = self.root.write();
-        let path = path.normalized().or(Err(PathError::InvalidPathname))?;
         let (parent, entry) = root.parent_and_entry_mut(&path, self.current_user)?;
         let Some((_, parent)) = parent else {
             // Attempted to remove `/`
