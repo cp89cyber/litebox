@@ -11,7 +11,14 @@ use thiserror::Error;
 /// Possible errors from [`FileSystem::open`]
 #[non_exhaustive]
 #[derive(Error, Debug)]
-pub enum OpenError {}
+pub enum OpenError {
+    #[error("requested access to the file is not allowed")]
+    AccessNotAllowed,
+    #[error("the parent directory does not allow write permission")]
+    NoWritePerms,
+    #[error(transparent)]
+    PathError(#[from] PathError),
+}
 
 /// Possible errors from [`FileSystem::close`]
 #[non_exhaustive]

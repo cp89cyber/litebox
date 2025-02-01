@@ -2,8 +2,11 @@
 
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 use hashbrown::HashMap;
 
+use crate::fd::{FileFd, OwnedFd};
 use crate::path::Arg;
 use crate::sync;
 
@@ -27,6 +30,7 @@ pub struct FileSystem<'platform, Platform: sync::RawSyncPrimitivesProvider> {
     current_user: UserInfo,
     // cwd invariant: always ends with a `/`
     current_working_dir: String,
+    descriptors: sync::RwLock<'platform, Platform, Descriptors<'platform, Platform>>,
 }
 
 impl<'platform, Platform: sync::RawSyncPrimitivesProvider> FileSystem<'platform, Platform> {
@@ -39,6 +43,7 @@ impl<'platform, Platform: sync::RawSyncPrimitivesProvider> FileSystem<'platform,
     pub fn new(platform: &'platform Platform) -> Self {
         let sync = sync::Synchronization::new(platform);
         let root = sync.new_rwlock(RootDir::new(&sync));
+        let descriptors = sync.new_rwlock(Descriptors::new());
         Self {
             sync,
             root,
@@ -47,6 +52,7 @@ impl<'platform, Platform: sync::RawSyncPrimitivesProvider> FileSystem<'platform,
                 group: 1000,
             },
             current_working_dir: "/".into(),
+            descriptors,
         }
     }
 }
@@ -80,19 +86,89 @@ impl<Platform: sync::RawSyncPrimitivesProvider> super::FileSystem for FileSystem
         path: impl crate::path::Arg,
         flags: super::OFlags,
         mode: super::Mode,
-    ) -> Result<crate::fd::FileFd, OpenError> {
+    ) -> Result<FileFd, OpenError> {
+        use super::OFlags;
+        let currently_supported_oflags: OFlags =
+            OFlags::CREAT | OFlags::RDONLY | OFlags::WRONLY | OFlags::RDWR;
+        if flags.contains(currently_supported_oflags.complement()) {
+            unimplemented!()
+        }
+        let path = self.absolute_path(path)?;
+        let entry = if flags.contains(OFlags::CREAT) {
+            let mut root = self.root.write();
+            let (parent, entry) = root.parent_and_entry(&path, self.current_user)?;
+            if let Some(entry) = entry {
+                entry
+            } else {
+                let Some((_, parent)) = parent else {
+                    // Only `/` does not have a parent; any other scenario (e.g., missing ancestor)
+                    // is handled already by a `PathError`. If `/` was passed, then it would have
+                    // gotten `Some(entry)` out already. Thus, this is unreachable.
+                    unreachable!()
+                };
+                let mut parent = parent.write();
+                if !self.current_user.can_write(&parent.perms) {
+                    return Err(OpenError::NoWritePerms);
+                };
+                parent.children_count = parent.children_count.checked_add(1).unwrap();
+                let entry = Entry::File(Arc::new(self.sync.new_rwlock(FileX {
+                    perms: Permissions {
+                        mode,
+                        userinfo: self.current_user,
+                    },
+                })));
+                let old = root.entries.insert(path, entry.clone());
+                assert!(old.is_none());
+                entry
+            }
+        } else {
+            let root = self.root.read();
+            let (_, entry) = root.parent_and_entry(&path, self.current_user)?;
+            let Some(entry) = entry else {
+                return Err(PathError::NoSuchFileOrDirectory)?;
+            };
+            entry
+        };
+        let read_allowed = if flags.contains(OFlags::RDONLY) || flags.contains(OFlags::RDWR) {
+            if !self.current_user.can_read(&entry.perms()) {
+                return Err(OpenError::AccessNotAllowed);
+            }
+            true
+        } else {
+            false
+        };
+        let write_allowed = if flags.contains(OFlags::WRONLY) || flags.contains(OFlags::RDWR) {
+            true
+        } else {
+            if !self.current_user.can_write(&entry.perms()) {
+                return Err(OpenError::AccessNotAllowed);
+            }
+            false
+        };
+        match entry {
+            Entry::File(file) => Ok(self.descriptors.write().insert(Descriptor::File {
+                file: file.clone(),
+                read_allowed,
+                write_allowed,
+                position: 0,
+            })),
+            Entry::Dir(dir) => Ok(self
+                .descriptors
+                .write()
+                .insert(Descriptor::Dir { dir: dir.clone() })),
+        }
+    }
+
+    fn close(&self, fd: FileFd) -> Result<(), CloseError> {
+        self.descriptors.write().remove(fd);
+        Ok(())
+    }
+
+    fn read(&self, fd: &FileFd, buf: &mut [u8]) -> Result<usize, ReadError> {
         todo!()
     }
 
-    fn close(&self, fd: crate::fd::FileFd) -> Result<(), CloseError> {
-        todo!()
-    }
-
-    fn read(&self, fd: &crate::fd::FileFd, buf: &mut [u8]) -> Result<usize, ReadError> {
-        todo!()
-    }
-
-    fn write(&self, fd: &crate::fd::FileFd, buf: &[u8]) -> Result<usize, WriteError> {
+    fn write(&self, fd: &FileFd, buf: &[u8]) -> Result<usize, WriteError> {
         todo!()
     }
 
@@ -174,6 +250,7 @@ impl<Platform: sync::RawSyncPrimitivesProvider> super::FileSystem for FileSystem
                 children_count: 0,
             }))),
         );
+        assert!(old.is_none());
         Ok(())
     }
 
@@ -277,6 +354,15 @@ enum Entry<'platform, Platform: sync::RawSyncPrimitivesProvider> {
     Dir(Dir<'platform, Platform>),
 }
 
+impl<Platform: sync::RawSyncPrimitivesProvider> Entry<'_, Platform> {
+    fn perms(&self) -> Permissions {
+        match self {
+            Self::File(file) => file.read().perms.clone(),
+            Self::Dir(dir) => dir.read().perms.clone(),
+        }
+    }
+}
+
 impl<Platform: sync::RawSyncPrimitivesProvider> Clone for Entry<'_, Platform> {
     fn clone(&self) -> Self {
         match self {
@@ -300,6 +386,7 @@ struct FileX {
     // TODO: Actual data
 }
 
+#[derive(Clone)]
 struct Permissions {
     mode: Mode,
     userinfo: UserInfo,
@@ -350,5 +437,51 @@ impl Permissions {
         } else {
             self.mode.contains(Mode::XOTH)
         }
+    }
+}
+
+struct Descriptors<'platform, Platform: sync::RawSyncPrimitivesProvider> {
+    descriptors: Vec<Option<Descriptor<'platform, Platform>>>,
+}
+
+enum Descriptor<'platform, Platform: sync::RawSyncPrimitivesProvider> {
+    File {
+        file: File<'platform, Platform>,
+        read_allowed: bool,
+        write_allowed: bool,
+        position: usize,
+    },
+    Dir {
+        dir: Dir<'platform, Platform>,
+    },
+}
+
+impl<'platform, Platform: sync::RawSyncPrimitivesProvider> Descriptors<'platform, Platform> {
+    fn new() -> Self {
+        Self {
+            descriptors: vec![],
+        }
+    }
+
+    fn insert(&mut self, descriptor: Descriptor<'platform, Platform>) -> FileFd {
+        let idx = self
+            .descriptors
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or_else(|| {
+                self.descriptors.push(None);
+                self.descriptors.len() - 1
+            });
+        let old = self.descriptors[idx].replace(descriptor);
+        assert!(old.is_none());
+        FileFd {
+            x: OwnedFd::new(idx),
+        }
+    }
+
+    fn remove(&mut self, mut fd: FileFd) {
+        fd.x.mark_as_closed();
+        let old = self.descriptors[fd.x.as_usize()].take();
+        assert!(old.is_some());
     }
 }
