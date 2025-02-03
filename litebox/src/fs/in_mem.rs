@@ -116,6 +116,7 @@ impl<Platform: sync::RawSyncPrimitivesProvider> super::FileSystem for FileSystem
                         mode,
                         userinfo: self.current_user,
                     },
+                    data: Vec::new(),
                 })));
                 let old = root.entries.insert(path, entry.clone());
                 assert!(old.is_none());
@@ -165,11 +166,63 @@ impl<Platform: sync::RawSyncPrimitivesProvider> super::FileSystem for FileSystem
     }
 
     fn read(&self, fd: &FileFd, buf: &mut [u8]) -> Result<usize, ReadError> {
-        todo!()
+        let mut descriptors = self.descriptors.write();
+        let Descriptor::File {
+            file,
+            read_allowed,
+            write_allowed: _,
+            position,
+        } = descriptors.get_mut(fd)
+        else {
+            return Err(ReadError::NotAFile);
+        };
+        if !*read_allowed {
+            return Err(ReadError::NotForReading);
+        }
+        let file = file.read();
+        let start = (*position).min(file.data.len());
+        let end = position
+            .checked_add(buf.len())
+            .unwrap()
+            .min(file.data.len());
+        debug_assert!(start <= end);
+        let retlen = end - start;
+        buf[..retlen].copy_from_slice(&file.data[start..end]);
+        *position = end;
+        Ok(retlen)
     }
 
     fn write(&self, fd: &FileFd, buf: &[u8]) -> Result<usize, WriteError> {
-        todo!()
+        let mut descriptors = self.descriptors.write();
+        let Descriptor::File {
+            file,
+            read_allowed: _,
+            write_allowed,
+            position,
+        } = descriptors.get_mut(fd)
+        else {
+            return Err(WriteError::NotAFile);
+        };
+        if !*write_allowed {
+            return Err(WriteError::NotForWriting);
+        }
+        let mut file = file.write();
+        let start = if *position < file.data.len() {
+            let start = *position;
+            let end = position
+                .checked_add(buf.len())
+                .unwrap()
+                .min(file.data.len());
+            debug_assert!(start <= end);
+            let first_half_len = end - start;
+            file.data[start..end].copy_from_slice(&buf[..first_half_len]);
+            first_half_len
+        } else {
+            0
+        };
+        file.data.extend(&buf[start..]);
+        *position = file.data.len();
+        Ok(buf.len())
     }
 
     fn chmod(&self, path: impl crate::path::Arg, mode: super::Mode) -> Result<(), ChmodError> {
@@ -383,7 +436,7 @@ type File<'platform, Platform> = Arc<sync::RwLock<'platform, Platform, FileX>>;
 
 struct FileX {
     perms: Permissions,
-    // TODO: Actual data
+    data: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -483,5 +536,16 @@ impl<'platform, Platform: sync::RawSyncPrimitivesProvider> Descriptors<'platform
         fd.x.mark_as_closed();
         let old = self.descriptors[fd.x.as_usize()].take();
         assert!(old.is_some());
+    }
+
+    fn get(&self, fd: &FileFd) -> &Descriptor<'platform, Platform> {
+        // Since the `fd` is borrowed, it must still exist, thus this index will always exist, as
+        // well as have a value within it.
+        self.descriptors[fd.x.as_usize()].as_ref().unwrap()
+    }
+    fn get_mut(&mut self, fd: &FileFd) -> &mut Descriptor<'platform, Platform> {
+        // Since the `fd` is borrowed, it must still exist, thus this index will always exist, as
+        // well as have a value within it.
+        self.descriptors[fd.x.as_usize()].as_mut().unwrap()
     }
 }

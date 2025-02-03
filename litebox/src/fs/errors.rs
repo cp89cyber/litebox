@@ -28,12 +28,22 @@ pub enum CloseError {}
 /// Possible errors from [`FileSystem::read`]
 #[non_exhaustive]
 #[derive(Error, Debug)]
-pub enum ReadError {}
+pub enum ReadError {
+    #[error("file descriptor does not point to a file")]
+    NotAFile,
+    #[error("file not open for reading")]
+    NotForReading,
+}
 
 /// Possible errors from [`FileSystem::write`]
 #[non_exhaustive]
 #[derive(Error, Debug)]
-pub enum WriteError {}
+pub enum WriteError {
+    #[error("file descriptor does not point to a file")]
+    NotAFile,
+    #[error("file not open for writing")]
+    NotForWriting,
+}
 
 /// Possible errors from [`FileSystem::chmod`]
 #[non_exhaustive]
