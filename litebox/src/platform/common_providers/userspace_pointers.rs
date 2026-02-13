@@ -31,7 +31,7 @@
 //!    accesses will still cause the program to crash (e.g., with SIGSEGV), but
 //!    with the additional overhead of the fallible copy mechanism.
 
-use crate::mm::exception_table::memcpy_fallible;
+use crate::mm::exception_table::{copy_nonoverlapping_fallible, read_fallible, write_fallible};
 use crate::platform::{RawConstPointer, RawMutPointer};
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -131,43 +131,9 @@ impl<V, T> core::fmt::Debug for UserConstPtr<V, T> {
 fn read_at_offset<V: ValidateAccess, T: FromBytes>(ptr: *const T, count: isize) -> Option<T> {
     let src = ptr.wrapping_add(usize::try_from(count).ok()?);
     let src = V::validate(src.cast_mut())?.cast_const();
-    // Match on the size of `T` to use the appropriate fallible read function to
-    // ensure that small aligned reads are atomic (and faster than a full
-    // memcpy). This match will be evaluated at compile time, so there is no
-    // runtime overhead.
-    //
-    // SAFETY: The FromBytes bound on T guarantees that any byte pattern is valid for T,
-    // so transmute_copy is safe. The memory access itself is fallible and returns None
-    // on invalid memory access.
-    let val = unsafe {
-        match size_of::<T>() {
-            1 => core::mem::transmute_copy(
-                &crate::mm::exception_table::read_u8_fallible(src.cast()).ok()?,
-            ),
-            2 => core::mem::transmute_copy(
-                &crate::mm::exception_table::read_u16_fallible(src.cast()).ok()?,
-            ),
-            4 => core::mem::transmute_copy(
-                &crate::mm::exception_table::read_u32_fallible(src.cast()).ok()?,
-            ),
-            #[cfg(target_pointer_width = "64")]
-            8 => core::mem::transmute_copy(
-                &crate::mm::exception_table::read_u64_fallible(src.cast()).ok()?,
-            ),
-            _ => {
-                let mut data = core::mem::MaybeUninit::<T>::uninit();
-                memcpy_fallible(
-                    data.as_mut_ptr().cast(),
-                    src.cast(),
-                    core::mem::size_of::<T>(),
-                )
-                .ok()?;
-
-                data.assume_init()
-            }
-        }
-    };
-    Some(val)
+    // SAFETY: `src` comes from validated userspace memory. `read_fallible`
+    // converts any access fault into `Err`.
+    unsafe { read_fallible(src).ok() }
 }
 
 fn to_owned_slice<V: ValidateAccess, T: FromBytes>(
@@ -180,14 +146,9 @@ fn to_owned_slice<V: ValidateAccess, T: FromBytes>(
     let ptr = V::validate_slice(core::ptr::slice_from_raw_parts(ptr, len).cast_mut())?.cast_const();
     let mut data = alloc::boxed::Box::<[T]>::new_uninit_slice(len);
     // SAFETY: The FromBytes bound on T guarantees that any byte pattern is valid for T.
-    // The memcpy_fallible operation returns None on invalid memory access.
+    // The fallible copy returns None on invalid memory access.
     unsafe {
-        memcpy_fallible(
-            data.as_mut_ptr().cast(),
-            ptr.cast(),
-            len * core::mem::size_of::<T>(),
-        )
-        .ok()?;
+        copy_nonoverlapping_fallible(ptr, data.as_mut_ptr().cast::<T>(), len).ok()?;
         Some(data.assume_init())
     }
 }
@@ -282,41 +243,9 @@ impl<V: ValidateAccess, T: FromBytes + IntoBytes> RawMutPointer<T> for UserMutPt
     fn write_at_offset(self, count: isize, value: T) -> Option<()> {
         let dst = self.as_ptr().wrapping_add(usize::try_from(count).ok()?);
         let dst = V::validate(dst)?;
-        // Match on the size of `T` to use the appropriate fallible write function to
-        // ensure that small aligned writes are atomic (and faster than a full
-        // memcpy). This match will be evaluated at compile time, so there is no
-        // runtime overhead.
-        //
-        // SAFETY: The IntoBytes bound on T guarantees that T can be safely written as bytes.
-        // The transmute_copy is safe because T implements IntoBytes. The memory access
-        // itself is fallible and returns None on invalid memory access.
-        unsafe {
-            match size_of::<T>() {
-                1 => crate::mm::exception_table::write_u8_fallible(
-                    dst.cast(),
-                    core::mem::transmute_copy(&value),
-                ),
-                2 => crate::mm::exception_table::write_u16_fallible(
-                    dst.cast(),
-                    core::mem::transmute_copy(&value),
-                ),
-                4 => crate::mm::exception_table::write_u32_fallible(
-                    dst.cast(),
-                    core::mem::transmute_copy(&value),
-                ),
-                #[cfg(target_pointer_width = "64")]
-                8 => crate::mm::exception_table::write_u64_fallible(
-                    dst.cast(),
-                    core::mem::transmute_copy(&value),
-                ),
-                _ => memcpy_fallible(
-                    dst.cast(),
-                    (&raw const value).cast(),
-                    core::mem::size_of::<T>(),
-                ),
-            }
-        }
-        .ok()
+        // SAFETY: `dst` comes from validated userspace memory. `write_fallible`
+        // converts any access fault into `Err`.
+        unsafe { write_fallible(dst, value).ok() }
     }
 
     fn mutate_subslice_with<R>(
@@ -336,6 +265,8 @@ impl<V: ValidateAccess, T: FromBytes + IntoBytes> RawMutPointer<T> for UserMutPt
         }
         let dst = self.as_ptr().wrapping_add(start_offset);
         let dst = V::validate_slice(core::ptr::slice_from_raw_parts_mut(dst, buf.len()))?;
-        unsafe { memcpy_fallible(dst.cast(), buf.as_ptr().cast(), size_of_val(buf)).ok() }
+        // SAFETY: `dst` points to a validated writable userspace range and
+        // `buf` is a valid source slice. The fallible copy reports access faults.
+        unsafe { copy_nonoverlapping_fallible(buf.as_ptr(), dst, buf.len()).ok() }
     }
 }

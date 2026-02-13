@@ -196,16 +196,21 @@ impl<Host: HostInterface> RawMutex<Host> {
                 Ok(()) => {
                     return Ok(UnblockedOrTimedOut::Unblocked);
                 }
-                Err(Errno::EAGAIN | Errno::EINTR) => {
+                Err(Errno::EAGAIN) => {
                     // If the futex value does not match val, then the call fails
                     // immediately with the error EAGAIN.
                     return Err(ImmediatelyWokenUp);
                 }
+                Err(Errno::EINTR) => {}
                 Err(Errno::ETIMEDOUT) => {
                     return Ok(UnblockedOrTimedOut::TimedOut);
                 }
-                Err(e) => {
-                    todo!("Error: {:?}", e);
+                Err(_e) => {
+                    Host::log(
+                        "Unexpected futex error in block_or_maybe_timeout; \
+                         treating as spurious wakeup\n",
+                    );
+                    return Err(ImmediatelyWokenUp);
                 }
             }
         }
@@ -328,9 +333,13 @@ impl<Host: HostInterface> IPInterfaceProvider for LinuxKernel<Host> {
 
 impl<Host: HostInterface> litebox::platform::StdioProvider for LinuxKernel<Host> {
     fn read_from_stdin(&self, buf: &mut [u8]) -> Result<usize, litebox::platform::StdioReadError> {
-        Host::read_from_stdin(buf).map_err(|err| match err {
-            Errno::EPIPE => litebox::platform::StdioReadError::Closed,
-            _ => panic!("unhandled error {err}"),
+        Host::read_from_stdin(buf).map_err(|err| {
+            if err == Errno::EPIPE {
+                litebox::platform::StdioReadError::Closed
+            } else {
+                Host::log("Unexpected stdin read error; treating stream as closed\n");
+                litebox::platform::StdioReadError::Closed
+            }
         })
     }
 
@@ -339,9 +348,13 @@ impl<Host: HostInterface> litebox::platform::StdioProvider for LinuxKernel<Host>
         stream: litebox::platform::StdioOutStream,
         buf: &[u8],
     ) -> Result<usize, litebox::platform::StdioWriteError> {
-        Host::write_to(stream, buf).map_err(|err| match err {
-            Errno::EPIPE => litebox::platform::StdioWriteError::Closed,
-            _ => panic!("unhandled error {err}"),
+        Host::write_to(stream, buf).map_err(|err| {
+            if err == Errno::EPIPE {
+                litebox::platform::StdioWriteError::Closed
+            } else {
+                Host::log("Unexpected stdout/stderr write error; treating stream as closed\n");
+                litebox::platform::StdioWriteError::Closed
+            }
         })
     }
 

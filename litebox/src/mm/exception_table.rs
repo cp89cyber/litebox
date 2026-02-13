@@ -17,6 +17,7 @@
 //! New fallible functions should follow the pattern established by [`memcpy_fallible`].
 
 use crate::utils::TruncateExt as _;
+use zerocopy::{FromBytes, IntoBytes};
 
 #[cfg(any(target_os = "linux", target_os = "none"))]
 macro_rules! ex_table_section {
@@ -106,6 +107,27 @@ pub unsafe fn memcpy_fallible(dst: *mut u8, src: *const u8, size: usize) -> Resu
     Ok(())
 }
 
+/// Fallible variant of [`core::ptr::copy_nonoverlapping`].
+///
+/// Uses checked arithmetic to prevent byte-count overflow when converting
+/// element counts to bytes.
+///
+/// # Safety
+/// The same requirements as [`core::ptr::copy_nonoverlapping`] apply:
+/// - `src` must be valid for reads of `count * size_of::<T>()` bytes
+/// - `dst` must be valid for writes of `count * size_of::<T>()` bytes
+/// - The source and destination ranges must not overlap
+pub unsafe fn copy_nonoverlapping_fallible<T>(
+    src: *const T,
+    dst: *mut T,
+    count: usize,
+) -> Result<(), Fault> {
+    let size = core::mem::size_of::<T>();
+    let bytes = count.checked_mul(size).ok_or(Fault)?;
+    // SAFETY: the caller upholds pointer validity/non-overlap constraints.
+    unsafe { memcpy_fallible(dst.cast(), src.cast(), bytes) }
+}
+
 macro_rules! read_fn {
     ($name:ident, $ty:ty, $mov_instr:expr) => {
         /// Reads a value from the given `src` pointer in a fallible manner.
@@ -146,6 +168,35 @@ read_fn!(read_u32_fallible, u32, "mov {dest:e}, dword ptr [{src}]");
 #[cfg(target_pointer_width = "64")]
 read_fn!(read_u64_fallible, u64, "mov {dest:r}, qword ptr [{src}]");
 
+/// Reads a value from the given `src` pointer in a fallible manner.
+///
+/// For 1/2/4/(8 on 64-bit) byte types, this uses dedicated fallible scalar
+/// accessors to preserve small aligned atomic access semantics.
+///
+/// # Safety
+/// `src` must be valid for reads of a `T`, or a pointer that's guaranteed to
+/// be in non-Rust memory.
+pub unsafe fn read_fallible<T: FromBytes>(src: *const T) -> Result<T, Fault> {
+    if core::mem::size_of::<T>() == 0 {
+        return Ok(T::new_zeroed());
+    }
+    // SAFETY: `T: FromBytes` guarantees any copied byte pattern is valid.
+    unsafe {
+        match core::mem::size_of::<T>() {
+            1 => Ok(core::mem::transmute_copy(&read_u8_fallible(src.cast())?)),
+            2 => Ok(core::mem::transmute_copy(&read_u16_fallible(src.cast())?)),
+            4 => Ok(core::mem::transmute_copy(&read_u32_fallible(src.cast())?)),
+            #[cfg(target_pointer_width = "64")]
+            8 => Ok(core::mem::transmute_copy(&read_u64_fallible(src.cast())?)),
+            _ => {
+                let mut value = core::mem::MaybeUninit::<T>::uninit();
+                copy_nonoverlapping_fallible(src, value.as_mut_ptr().cast::<T>(), 1)?;
+                Ok(value.assume_init())
+            }
+        }
+    }
+}
+
 macro_rules! write_fn {
     ($name:ident, $ty:ty, $mov_instr:expr) => {
         /// Writes a value to the given `dest` pointer in a fallible manner.
@@ -178,6 +229,31 @@ write_fn!(write_u16_fallible, u16, "mov word ptr [{dest}], {src:x}");
 write_fn!(write_u32_fallible, u32, "mov dword ptr [{dest}], {src:e}");
 #[cfg(target_pointer_width = "64")]
 write_fn!(write_u64_fallible, u64, "mov qword ptr [{dest}], {src:r}");
+
+/// Writes a value to the given `dest` pointer in a fallible manner.
+///
+/// For 1/2/4/(8 on 64-bit) byte types, this uses dedicated fallible scalar
+/// accessors to preserve small aligned atomic access semantics.
+///
+/// # Safety
+/// `dest` must be valid for writes of a `T`, or a pointer that's guaranteed to
+/// be in non-Rust memory.
+pub unsafe fn write_fallible<T: IntoBytes>(dest: *mut T, value: T) -> Result<(), Fault> {
+    if core::mem::size_of::<T>() == 0 {
+        return Ok(());
+    }
+    // SAFETY: `T: IntoBytes` allows writing the underlying bytes.
+    unsafe {
+        match core::mem::size_of::<T>() {
+            1 => write_u8_fallible(dest.cast(), core::mem::transmute_copy(&value)),
+            2 => write_u16_fallible(dest.cast(), core::mem::transmute_copy(&value)),
+            4 => write_u32_fallible(dest.cast(), core::mem::transmute_copy(&value)),
+            #[cfg(target_pointer_width = "64")]
+            8 => write_u64_fallible(dest.cast(), core::mem::transmute_copy(&value)),
+            _ => copy_nonoverlapping_fallible(core::ptr::from_ref(&value), dest, 1),
+        }
+    }
+}
 
 /// Writes a value to the given `dest` pointer in a fallible manner.
 ///

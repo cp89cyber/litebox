@@ -453,6 +453,7 @@ impl<Host: HostInterface> LinuxKernel<Host> {
     ///
     /// Note: VTL0 physical memory is external/remote memory that this Rust binary doesn't own,
     /// so mapping it doesn't create aliasing issues within the Rust memory model.
+    #[deny(clippy::arithmetic_side_effects)]
     fn map_vtl0_phys_range(
         &self,
         phys_start: x86_64::PhysAddr,
@@ -475,7 +476,10 @@ impl<Host: HostInterface> LinuxKernel<Host> {
             self.page_table_manager
                 .current_page_table()
                 .map_phys_frame_range(frame_range, flags)?,
-            usize::try_from(frame_range.len()).unwrap() * PAGE_SIZE,
+            usize::try_from(frame_range.len())
+                .ok()
+                .and_then(|count| count.checked_mul(PAGE_SIZE))
+                .ok_or(MapToError::FrameAllocationFailed)?,
         ))
     }
 
@@ -488,6 +492,7 @@ impl<Host: HostInterface> LinuxKernel<Host> {
     /// LiteBox-owned buffer, and unmapping immediately. No Rust references are created to the
     /// mapped VTL0 memory; all accesses use raw pointer operations (read_volatile /
     /// copy_nonoverlapping) to avoid violating Rust's aliasing model.
+    #[deny(clippy::arithmetic_side_effects)]
     fn unmap_vtl0_pages(
         &self,
         page_addr: *const u8,
@@ -497,11 +502,15 @@ impl<Host: HostInterface> LinuxKernel<Host> {
         if page_addr.page_offset() != PageOffset::new(0) {
             return Err(DeallocationError::Unaligned);
         }
+        let end_addr = page_addr
+            .as_u64()
+            .checked_add(u64::try_from(length).map_err(|_| DeallocationError::Unaligned)?)
+            .ok_or(DeallocationError::Unaligned)?;
         unsafe {
             self.page_table_manager.current_page_table().unmap_pages(
                 PageRange::<PAGE_SIZE>::new(
                     page_addr.as_u64().truncate(),
-                    (page_addr + length as u64)
+                    x86_64::VirtAddr::new_truncate(end_addr)
                         .align_up(Size4KiB::SIZE)
                         .as_u64()
                         .truncate(),
@@ -514,22 +523,28 @@ impl<Host: HostInterface> LinuxKernel<Host> {
     }
 
     /// Map a VTL0 physical range and return a guard that unmaps on drop.
+    #[deny(clippy::arithmetic_side_effects)]
     fn map_vtl0_guard(
         &self,
         phys_addr: x86_64::PhysAddr,
         size: u64,
         flags: PageTableFlags,
     ) -> Option<Vtl0MappedGuard<'_, Host>> {
-        let (page_addr, page_aligned_length) = self
-            .map_vtl0_phys_range(phys_addr, phys_addr + size, flags)
-            .ok()?;
-        let page_offset: usize = (phys_addr - phys_addr.align_down(Size4KiB::SIZE)).truncate();
+        let phys_end = x86_64::PhysAddr::new(phys_addr.as_u64().checked_add(size)?);
+        let (page_addr, page_aligned_length) =
+            self.map_vtl0_phys_range(phys_addr, phys_end, flags).ok()?;
+        let page_offset: usize = usize::try_from(
+            phys_addr
+                .as_u64()
+                .checked_sub(phys_addr.align_down(Size4KiB::SIZE).as_u64())?,
+        )
+        .ok()?;
         Some(Vtl0MappedGuard {
             owner: self,
             page_addr,
             page_aligned_length,
             ptr: page_addr.wrapping_add(page_offset),
-            size: size.truncate(),
+            size: usize::try_from(size).ok()?,
         })
     }
 
@@ -852,18 +867,19 @@ impl<Host: HostInterface> RawMutex<Host> {
                 }
                 Err(Errno::EAGAIN) => {
                     // If the futex value does not match val, then the call fails
-                    // immediately with the error EAGAIN.
+                    // immediately with EAGAIN.
                     return Err(ImmediatelyWokenUp);
                 }
-                Err(Errno::EINTR) => {
-                    // return Err(ImmediatelyWokenUp);
-                    todo!("EINTR");
-                }
+                Err(Errno::EINTR) => {}
                 Err(Errno::ETIMEDOUT) => {
                     return Ok(UnblockedOrTimedOut::TimedOut);
                 }
-                Err(e) => {
-                    panic!("Error: {:?}", e);
+                Err(_e) => {
+                    Host::log(
+                        "Unexpected futex error in block_or_maybe_timeout; \
+                         treating as spurious wakeup\n",
+                    );
+                    return Err(ImmediatelyWokenUp);
                 }
             }
         }
